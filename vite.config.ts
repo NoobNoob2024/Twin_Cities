@@ -17,6 +17,17 @@ export default defineConfig({
         {
           src: 'node_modules/onnxruntime-web/dist/ort-wasm-simd-threaded*.mjs',
           dest: '.'
+        },
+        // GitHub Pages (and some bundler flows) may request the ORT runtime files under `/assets/`.
+        // Copy a non-hashed copy there to avoid 404s like:
+        //   /assets/ort-wasm-simd-threaded.jsep.mjs
+        {
+          src: 'node_modules/onnxruntime-web/dist/*.wasm',
+          dest: 'assets'
+        },
+        {
+          src: 'node_modules/onnxruntime-web/dist/ort-wasm-simd-threaded*.mjs',
+          dest: 'assets'
         }
       ]
     })

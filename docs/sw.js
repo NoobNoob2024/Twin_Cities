@@ -18,6 +18,12 @@ self.addEventListener('install', (event) => {
           './ort-wasm-simd-threaded.wasm',
           './ort-wasm-simd-threaded.jsep.wasm',
           './ort-wasm-simd-threaded.asyncify.wasm',
+          './assets/ort-wasm-simd-threaded.mjs',
+          './assets/ort-wasm-simd-threaded.jsep.mjs',
+          './assets/ort-wasm-simd-threaded.asyncify.mjs',
+          './assets/ort-wasm-simd-threaded.wasm',
+          './assets/ort-wasm-simd-threaded.jsep.wasm',
+          './assets/ort-wasm-simd-threaded.asyncify.wasm',
         ]),
       )
       .then(() => self.skipWaiting()),
