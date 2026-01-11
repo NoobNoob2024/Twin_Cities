@@ -1,0 +1,24 @@
+import { defineConfig } from 'vite'
+import react from '@vitejs/plugin-react'
+import { viteStaticCopy } from 'vite-plugin-static-copy'
+
+// https://vitejs.dev/config/
+export default defineConfig({
+  // Pure frontend (static) friendly: relative asset paths for sub-path hosting.
+  base: './',
+  plugins: [
+    react(),
+    viteStaticCopy({
+      targets: [
+        {
+          src: 'node_modules/onnxruntime-web/dist/*.wasm',
+          dest: '.'
+        },
+        {
+          src: 'node_modules/onnxruntime-web/dist/ort-wasm-simd-threaded*.mjs',
+          dest: '.'
+        }
+      ]
+    })
+  ],
+})
