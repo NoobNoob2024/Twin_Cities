@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type PointerEvent } from 'react';
 import * as ort from 'onnxruntime-web';
+import { HeatmapCanvas } from '../components/HeatmapCanvas';
+import { Sparkline } from '../components/Sparkline';
 import { createImageSession } from '../lib/onnx';
 import { preprocessMnistFromCanvas } from '../lib/preprocessMnist';
 
@@ -16,6 +18,8 @@ export function HandwritingPage() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const previewHostRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const videoStreamRef = useRef<MediaStream | null>(null);
   const isDrawingRef = useRef(false);
   const lastPosRef = useRef<{ x: number; y: number } | null>(null);
   const historyRef = useRef<ImageData[]>([]);
@@ -28,6 +32,12 @@ export function HandwritingPage() {
   const [prediction, setPrediction] = useState<number | null>(null);
   const [probs, setProbs] = useState<Prob[]>([]);
   const [busy, setBusy] = useState(false);
+  const [inputTensorData, setInputTensorData] = useState<Float32Array | null>(null);
+  const [featureVec, setFeatureVec] = useState<Float32Array | null>(null);
+  const [vizOn, setVizOn] = useState(true);
+  const [cameraOpen, setCameraOpen] = useState(false);
+  const [cameraErr, setCameraErr] = useState('');
+  const [permDiag, setPermDiag] = useState<Record<string, string>>({});
 
   const statusDotClass = useMemo(() => {
     if (modelStatus === 'ready') return 'statusDot ok';
@@ -70,6 +80,89 @@ export function HandwritingPage() {
     if (!host) return;
     host.replaceChildren();
   }, []);
+
+  async function refreshPermissions() {
+    const diag: Record<string, string> = {};
+    diag.protocol = location.protocol;
+    diag.isSecureContext = String(window.isSecureContext);
+    diag.mediaDevices = String(Boolean(navigator.mediaDevices?.getUserMedia));
+    try {
+      const p = (navigator.permissions as unknown as { query?: (d: { name: string }) => Promise<{ state: string }> })
+        .query;
+      if (!p) {
+        diag.permissionsApi = 'not supported';
+      } else {
+        const cam = await p({ name: 'camera' });
+        diag.camera = cam.state;
+        diag.permissionsApi = 'ok';
+      }
+    } catch (e) {
+      diag.permissionsApi = e instanceof Error ? e.message : String(e);
+    }
+    setPermDiag(diag);
+  }
+
+  useEffect(() => {
+    void refreshPermissions();
+  }, []);
+
+  async function openCamera() {
+    setCameraErr('');
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: 'environment' },
+        audio: false,
+      });
+      videoStreamRef.current = stream;
+      const v = videoRef.current;
+      if (v) {
+        v.srcObject = stream;
+        await v.play();
+      }
+      setCameraOpen(true);
+      await refreshPermissions();
+    } catch (e) {
+      setCameraErr(e instanceof Error ? e.message : String(e));
+      await refreshPermissions();
+    }
+  }
+
+  function closeCamera() {
+    setCameraOpen(false);
+    const stream = videoStreamRef.current;
+    if (stream) stream.getTracks().forEach((t) => t.stop());
+    videoStreamRef.current = null;
+    const v = videoRef.current;
+    if (v) v.srcObject = null;
+  }
+
+  async function captureFromCamera() {
+    const video = videoRef.current;
+    const canvas = canvasRef.current;
+    const ctx = canvas?.getContext('2d', { willReadFrequently: true });
+    if (!video || !canvas || !ctx) return;
+
+    snapshotForUndo();
+
+    ctx.fillStyle = 'white';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    const vw = video.videoWidth || 640;
+    const vh = video.videoHeight || 480;
+    const size = Math.min(vw, vh);
+    const sx = Math.floor((vw - size) / 2);
+    const sy = Math.floor((vh - size) / 2);
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(video, sx, sy, size, size, 0, 0, canvas.width, canvas.height);
+
+    setPrediction(null);
+    setProbs([]);
+    setInputTensorData(null);
+    setFeatureVec(null);
+    const host = previewHostRef.current;
+    if (host) host.replaceChildren();
+  }
 
   function getCanvasPos(e: PointerEvent<HTMLCanvasElement>) {
     const canvas = canvasRef.current;
@@ -132,6 +225,8 @@ export function HandwritingPage() {
     historyRef.current = [];
     setPrediction(null);
     setProbs([]);
+    setInputTensorData(null);
+    setFeatureVec(null);
     const host = previewHostRef.current;
     if (host) host.replaceChildren();
   }
@@ -200,16 +295,19 @@ export function HandwritingPage() {
       const { tensorData, previewCanvas, hasInk } = preprocessMnistFromCanvas(canvasRef.current);
       const host = previewHostRef.current;
       if (host) host.replaceChildren(previewCanvas);
+      setInputTensorData(tensorData);
       if (!hasInk) {
         setPrediction(null);
         setProbs([]);
+        setFeatureVec(null);
         return;
       }
 
       const inputTensor = new ort.Tensor('float32', tensorData, [1, 1, 28, 28]);
       const results = await session.run({ input: inputTensor });
-      const output = results.output;
-      const logits = output.data as Float32Array;
+      const logits = results.output.data as Float32Array;
+      const features = results.features?.data as Float32Array | undefined;
+      if (features) setFeatureVec(new Float32Array(features));
       const p = softmax(logits);
       const ranked = p
         .map((v, digit) => ({ digit, p: v }))
@@ -267,6 +365,12 @@ export function HandwritingPage() {
                 <button type="button" className="btn" onClick={onPickImage} disabled={busy}>
                   上傳圖片
                 </button>
+                <button type="button" className="btn" onClick={() => void openCamera()} disabled={busy}>
+                  開啟相機
+                </button>
+                <button type="button" className="btn" onClick={() => setVizOn((v) => !v)} disabled={busy}>
+                  {vizOn ? '關閉可視化' : '開啟可視化'}
+                </button>
                 <button type="button" className="btn" onClick={undo} disabled={busy}>
                   復原
                 </button>
@@ -303,7 +407,7 @@ export function HandwritingPage() {
           <div className="cardHeader">
             <div>
               <div className="cardTitle">辨識結果</div>
-              <div className="cardHint">模型：ONNX Runtime Web（WASM）</div>
+              <div className="cardHint">模型：ONNX Runtime Web（WASM）｜可視化：輸入張量與特徵向量（模型真實使用）</div>
             </div>
             <div className="resultBig" aria-label="預測結果">
               {prediction === null ? '—' : prediction}
@@ -331,6 +435,20 @@ export function HandwritingPage() {
                 </div>
               </div>
             </div>
+
+            {vizOn && (
+              <div className="resultGrid" style={{ marginTop: 14 }}>
+                <HeatmapCanvas
+                  title="輸入張量熱圖（28×28，Normalize 後）"
+                  data={inputTensorData}
+                  rows={28}
+                  cols={28}
+                  mode="diverging"
+                  animateScan={busy}
+                />
+                <Sparkline title="影像特徵向量（encoder 輸出，128 維）" values={featureVec} />
+              </div>
+            )}
             {modelStatus === 'error' && (
               <div className="errorBox">
                 <div className="errorTitle">模型載入失敗</div>
@@ -340,9 +458,76 @@ export function HandwritingPage() {
                 </div>
               </div>
             )}
+
+            <div className="card" style={{ marginTop: 14, boxShadow: 'none' }}>
+              <div className="cardHeader">
+                <div>
+                  <div className="cardTitle">相機/環境診斷</div>
+                  <div className="cardHint">相機通常需要 HTTPS；若被拒絕需到瀏覽器網站設定允許</div>
+                </div>
+                <button type="button" className="btn" onClick={refreshPermissions}>
+                  重新檢查
+                </button>
+              </div>
+              <div className="cardBody">
+                <div className="diagGrid">
+                  <div className="kv">
+                    <div className="kvKey">protocol</div>
+                    <div className="mono">{permDiag.protocol ?? '-'}</div>
+                    <div className="kvKey">isSecureContext</div>
+                    <div className="mono">{permDiag.isSecureContext ?? '-'}</div>
+                    <div className="kvKey">mediaDevices</div>
+                    <div className="mono">{permDiag.mediaDevices ?? '-'}</div>
+                    <div className="kvKey">camera</div>
+                    <div className="mono">{permDiag.camera ?? '-'}</div>
+                  </div>
+                  <div className="kv">
+                    <div className="kvKey">提示</div>
+                    <div>
+                      <div>1) GitHub Pages：Settings → Pages → 勾選 Enforce HTTPS</div>
+                      <div>2) 瀏覽器網址列左側圖示 → Site settings → 允許相機</div>
+                      <div>3) 若在 App 內嵌 WebView，可能被策略禁用</div>
+                    </div>
+                    <div className="kvKey">Permissions API</div>
+                    <div className="mono">{permDiag.permissionsApi ?? '-'}</div>
+                  </div>
+                </div>
+              </div>
+            </div>
           </div>
         </section>
       </div>
+
+      {cameraOpen && (
+        <div className="modalBackdrop" role="dialog" aria-modal="true" aria-label="相機">
+          <div className="modalCard">
+            <div className="cardHeader">
+              <div>
+                <div className="cardTitle">相機擷取</div>
+                <div className="cardHint">按「擷取」會把影像貼到畫布，再用同一模型辨識</div>
+              </div>
+              <button type="button" className="btn" onClick={closeCamera}>
+                關閉
+              </button>
+            </div>
+            <div className="cardBody">
+              <video ref={videoRef} playsInline muted className="videoPreview" />
+              <div className="btnRow" style={{ marginTop: 12 }}>
+                <button type="button" className="btn btnPrimary" onClick={() => void captureFromCamera()}>
+                  擷取到畫布
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {cameraErr && (
+        <div className="errorBox" style={{ marginTop: 14 }}>
+          <div className="errorTitle">相機開啟失敗</div>
+          <div className="errorMsg mono">{cameraErr}</div>
+        </div>
+      )}
     </div>
   );
 }

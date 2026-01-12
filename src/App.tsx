@@ -2,13 +2,12 @@ import { useEffect, useState } from 'react';
 import './App.css';
 import { EvalPage } from './pages/EvalPage';
 import { HandwritingPage } from './pages/HandwritingPage';
-import { SpecPage } from './pages/SpecPage';
 import { VoicePage } from './pages/VoicePage';
 
 export default function App() {
-  const [tab, setTab] = useState<'handwriting' | 'voice' | 'eval' | 'spec'>(() => {
+  const [tab, setTab] = useState<'handwriting' | 'voice' | 'eval'>(() => {
     const saved = localStorage.getItem('mm.tab');
-    if (saved === 'handwriting' || saved === 'voice' || saved === 'eval' || saved === 'spec') return saved;
+    if (saved === 'handwriting' || saved === 'voice' || saved === 'eval') return saved;
     return 'handwriting';
   });
 
@@ -45,13 +44,6 @@ export default function App() {
           >
             準確度
           </button>
-          <button
-            type="button"
-            className={tab === 'spec' ? 'segmentedBtn active' : 'segmentedBtn'}
-            onClick={() => setTab('spec')}
-          >
-            專題說明
-          </button>
         </nav>
       </header>
 
@@ -59,7 +51,6 @@ export default function App() {
         {tab === 'handwriting' && <HandwritingPage />}
         {tab === 'voice' && <VoicePage />}
         {tab === 'eval' && <EvalPage />}
-        {tab === 'spec' && <SpecPage />}
       </main>
     </div>
   );

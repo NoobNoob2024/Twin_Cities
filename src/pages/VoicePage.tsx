@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import * as ort from 'onnxruntime-web';
+import { HeatmapCanvas } from '../components/HeatmapCanvas';
+import { Sparkline } from '../components/Sparkline';
 import {
   decodeAudioFileToMono,
   recordMono,
@@ -83,6 +85,10 @@ export function VoicePage() {
   const [aiProbs, setAiProbs] = useState<Array<{ digit: number; p: number }>>([]);
   const [err, setErr] = useState<string>('');
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const [mel, setMel] = useState<Float32Array | null>(null);
+  const [featureVec, setFeatureVec] = useState<Float32Array | null>(null);
+  const [vizOn, setVizOn] = useState(true);
+  const [permDiag, setPermDiag] = useState<Record<string, string>>({});
 
   useEffect(() => {
     let cancelled = false;
@@ -103,11 +109,45 @@ export function VoicePage() {
     };
   }, []);
 
+  async function refreshPermissions() {
+    const diag: Record<string, string> = {};
+    diag.protocol = location.protocol;
+    diag.isSecureContext = String(window.isSecureContext);
+    diag.mediaDevices = String(Boolean(navigator.mediaDevices?.getUserMedia));
+    diag.crossOriginIsolated = String(
+      (self as unknown as { crossOriginIsolated?: boolean }).crossOriginIsolated ?? false,
+    );
+
+    try {
+      const p = (navigator.permissions as unknown as { query?: (d: { name: string }) => Promise<{ state: string }> })
+        .query;
+      if (!p) {
+        diag.permissionsApi = 'not supported';
+      } else {
+        const mic = await p({ name: 'microphone' });
+        const cam = await p({ name: 'camera' });
+        diag.microphone = mic.state;
+        diag.camera = cam.state;
+        diag.permissionsApi = 'ok';
+      }
+    } catch (e) {
+      diag.permissionsApi = e instanceof Error ? e.message : String(e);
+    }
+
+    setPermDiag(diag);
+  }
+
+  useEffect(() => {
+    void refreshPermissions();
+  }, []);
+
   async function runAiOnce() {
     if (!speechSession) return;
     setErr('');
     setDigit(null);
     setAiProbs([]);
+    setMel(null);
+    setFeatureVec(null);
     setAiBusy(true);
     try {
       const captured = await recordMono(1050);
@@ -115,10 +155,13 @@ export function VoicePage() {
       const resampled = resampleLinear(oneSec, captured.sampleRate, SPEECH_INPUT.sampleRate);
       const fixed16k = takeOrPadToLength(resampled, SPEECH_INPUT.sampleRate);
 
-      const mel = melSpectrogram128x32From16k(fixed16k);
-      const inputTensor = new ort.Tensor('float32', mel, [1, 1, SPEECH_INPUT.nMels, SPEECH_INPUT.frames]);
+      const melSpec = melSpectrogram128x32From16k(fixed16k);
+      setMel(melSpec);
+      const inputTensor = new ort.Tensor('float32', melSpec, [1, 1, SPEECH_INPUT.nMels, SPEECH_INPUT.frames]);
       const results = await speechSession.run({ input: inputTensor });
       const logits = results.output.data as Float32Array;
+      const features = results.features?.data as Float32Array | undefined;
+      if (features) setFeatureVec(new Float32Array(features));
       const p = softmax(logits);
       const ranked = p
         .map((v, d) => ({ digit: d, p: v }))
@@ -138,6 +181,8 @@ export function VoicePage() {
     setErr('');
     setDigit(null);
     setAiProbs([]);
+    setMel(null);
+    setFeatureVec(null);
     setAiBusy(true);
     try {
       const decoded = await decodeAudioFileToMono(file);
@@ -145,10 +190,13 @@ export function VoicePage() {
       const centered = takeCenterSegment(resampled, SPEECH_INPUT.sampleRate);
       const fixed16k = takeOrPadToLength(centered, SPEECH_INPUT.sampleRate);
 
-      const mel = melSpectrogram128x32From16k(fixed16k);
-      const inputTensor = new ort.Tensor('float32', mel, [1, 1, SPEECH_INPUT.nMels, SPEECH_INPUT.frames]);
+      const melSpec = melSpectrogram128x32From16k(fixed16k);
+      setMel(melSpec);
+      const inputTensor = new ort.Tensor('float32', melSpec, [1, 1, SPEECH_INPUT.nMels, SPEECH_INPUT.frames]);
       const results = await speechSession.run({ input: inputTensor });
       const logits = results.output.data as Float32Array;
+      const features = results.features?.data as Float32Array | undefined;
+      if (features) setFeatureVec(new Float32Array(features));
       const p = softmax(logits);
       const ranked = p
         .map((v, d) => ({ digit: d, p: v }))
@@ -303,6 +351,9 @@ export function VoicePage() {
                 >
                   上傳音檔辨識
                 </button>
+                <button type="button" className="btn" onClick={() => setVizOn((v) => !v)} disabled={aiBusy}>
+                  {vizOn ? '關閉可視化' : '開啟可視化'}
+                </button>
                 <span className="pill mono">
                   SR={SPEECH_INPUT.sampleRate}Hz · Mel={SPEECH_INPUT.nMels}×{SPEECH_INPUT.frames}
                 </span>
@@ -329,6 +380,20 @@ export function VoicePage() {
                   <div className="resultBig">{digit === null ? '—' : digit}</div>
                 </div>
               </div>
+
+              {vizOn && (
+                <div className="resultGrid" style={{ marginTop: 14 }}>
+                  <HeatmapCanvas
+                    title="MelSpectrogram 熱圖（128×32，模型真實使用）"
+                    data={mel}
+                    rows={SPEECH_INPUT.nMels}
+                    cols={SPEECH_INPUT.frames}
+                    mode="mono"
+                    animateScan={aiBusy}
+                  />
+                  <Sparkline title="語音特徵向量（encoder 輸出，128 維）" values={featureVec} />
+                </div>
+              )}
 
               {speechModelStatus === 'error' && (
                 <div className="errorBox">
@@ -377,6 +442,46 @@ export function VoicePage() {
               <div className="errorMsg mono">{err}</div>
             </div>
           )}
+
+          <div className="card" style={{ marginTop: 14, boxShadow: 'none' }}>
+            <div className="cardHeader">
+              <div>
+                <div className="cardTitle">權限/環境診斷</div>
+                <div className="cardHint">麥克風/相機通常需要 HTTPS；若被拒絕需到瀏覽器網站設定允許</div>
+              </div>
+              <button type="button" className="btn" onClick={refreshPermissions}>
+                重新檢查
+              </button>
+            </div>
+            <div className="cardBody">
+              <div className="diagGrid">
+                <div className="kv">
+                  <div className="kvKey">protocol</div>
+                  <div className="mono">{permDiag.protocol ?? '-'}</div>
+                  <div className="kvKey">isSecureContext</div>
+                  <div className="mono">{permDiag.isSecureContext ?? '-'}</div>
+                  <div className="kvKey">mediaDevices</div>
+                  <div className="mono">{permDiag.mediaDevices ?? '-'}</div>
+                  <div className="kvKey">microphone</div>
+                  <div className="mono">{permDiag.microphone ?? '-'}</div>
+                  <div className="kvKey">camera</div>
+                  <div className="mono">{permDiag.camera ?? '-'}</div>
+                </div>
+                <div className="kv">
+                  <div className="kvKey">提示</div>
+                  <div>
+                    <div>1) GitHub Pages：Settings → Pages → 勾選 Enforce HTTPS</div>
+                    <div>2) 瀏覽器網址列左側圖示 → Site settings → 允許麥克風/相機</div>
+                    <div>3) 企業/學校網路可能封鎖裝置權限</div>
+                  </div>
+                  <div className="kvKey">crossOriginIsolated</div>
+                  <div className="mono">{permDiag.crossOriginIsolated ?? '-'}</div>
+                  <div className="kvKey">Permissions API</div>
+                  <div className="mono">{permDiag.permissionsApi ?? '-'}</div>
+                </div>
+              </div>
+            </div>
+          </div>
         </div>
       </section>
     </div>
